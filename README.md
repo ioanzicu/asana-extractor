@@ -25,7 +25,7 @@ A production-ready Go application that extracts users and projects from the Asan
 
 1. Clone or navigate to the repository:
 ```bash
-cd /Users/ioanzicu/interview/reco
+cd /asana-extractor
 ```
 
 2. Install dependencies:
