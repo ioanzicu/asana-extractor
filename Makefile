@@ -51,3 +51,42 @@ deps:
 install: build
 	@echo "Installing asana-extractor..."
 	@cp bin/asana-extractor $(GOPATH)/bin/
+
+
+######################## 
+# 		Docker 	 	   #
+########################
+
+# Docker configuration
+IMAGE_NAME := asana-extractor
+VERSION    := latest
+
+# Build the Docker image
+docker-build:
+	@echo "Building Docker image $(IMAGE_NAME):$(VERSION)..."
+	@docker build -t $(IMAGE_NAME):$(VERSION) .
+
+# Run the application in a Docker container
+# Note: This uses the .env file and mounts a local output directory
+docker-run:
+	@echo "Running $(IMAGE_NAME) in Docker..."
+	@docker run --rm -it \
+		--name $(IMAGE_NAME)-instance \
+		--env-file .env \
+		-v $(shell pwd)/output:/root/output \
+		$(IMAGE_NAME):$(VERSION)
+
+# Stop and remove a running container
+docker-stop:
+	@echo "Stopping Docker container..."
+	@docker stop $(IMAGE_NAME)-instance || true
+	@docker rm $(IMAGE_NAME)-instance || true
+
+# Remove Docker images
+docker-clean:
+	@echo "Removing Docker images..."
+	@docker rmi $(IMAGE_NAME):$(VERSION) || true
+
+# View container logs
+docker-logs:
+	@docker logs -f $(IMAGE_NAME)-instance

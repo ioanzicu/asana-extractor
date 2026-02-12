@@ -1,6 +1,6 @@
 # Asana Extractor
 
-A production-ready Go application that extracts users and projects from the Asana API. Built with a focus on resiliency, it features a custom token-bucket rate limiter, exponential backoff, and a high-precision cron-based scheduler.
+A production-ready Go application that extracts users and projects from the Asana API. Built with a focus on resiliency, it features a **concurrent actor-based architecture**, custom token-bucket rate limiting, and a high-precision cron-based scheduler.
 
 ## 🚀 Step-by-Step Quick Start
 
@@ -30,25 +30,85 @@ A production-ready Go application that extracts users and projects from the Asan
 
 ---
 
+## 🐳 Docker & Makefile Usage
+
+This project includes a **multi-stage Dockerfile** for optimized, small-footprint production images and a **Makefile** to simplify common tasks.
+
+### Prerequisites
+* [Docker](https://docs.docker.com/get-docker/) installed and running.
+* A valid `.env` file in the root directory.
+
+### Quick Commands
+
+| Command | Description |
+| :--- | :--- |
+| `make docker-build` | Builds the extractor image using Go 1.25. |
+| `make docker-run` | Starts the container, loads `.env`, and mounts `./output`. |
+| `make docker-stop` | Stops and removes the running container. |
+| `make docker-logs` | Tails the logs of the running extractor. |
+| `make docker-clean` | Deletes the local Docker image. |
+
+### Running with Persistent Storage
+To ensure your extracted data is saved on your host machine, `make docker-run` automatically mounts your local `./output` directory to the container.
+
+```bash
+# 1. Build the image
+make docker-build
+```
+
+```bash
+# 2. Start the background service
+make docker-run
+```
+
+```bash
+# 3. Stop the background service
+make docker-stop
+```
+
+```bash
+# 4. View the logs
+make docker-logs
+```
+
+```bash
+# 5. Remove the Docker image
+make docker-clean
+```
+
+---
+
+## 🏗 Architecture: The Concurrent Actor Pattern
+
+To ensure high-performance throughput while maintaining strict thread safety, the application utilizes a **Concurrent Actor Pattern**.
+
+
+
+### How it Works:
+* **The Workers (Fetchers/Writers)**: Separate goroutines are spawned for User and Project categories. These workers handle fetching paginated data from the API and performing atomic writes to the filesystem.
+* **The Channel (Communication)**: Workers communicate with the state manager using a buffered channel. They send "update functions" across the channel rather than modifying shared memory.
+* **The Actor (State Manager)**: A single dedicated goroutine acts as the "Actor." It is the **only** entity authorized to modify the internal `Stats` struct, eliminating data races and the need for Mutex locks.
+* **Orchestration**: A coordination layer separates fatal API errors from non-fatal storage errors, ensuring the scheduler can report accurately on the status of each run.
+
+---
+
 ## 🛠 Main Functionality
 
 The application operates as a scheduled service that performs the following:
 
-1.  **Identity Discovery**: Connects to Asana and fetches all accessible users and projects within the configured workspace.
-2.  **Resilient Extraction**: Processes resources using an internal queue that respects Asana's strict rate limits (Requests Per Minute and Concurrent Request limits).
-3.  **Atomic Persistence**: Saves each resource as an individual JSON file, using the Asana GID as the unique identifier to ensure data consistency and prevent overwrites.
-
-
+1.  **Identity Discovery**: Fetches all accessible users and projects within the configured workspace.
+2.  **Concurrent Extraction**: Processes resources using an internal queue that respects Asana's rate limits.
+3.  **Atomic Persistence**: Saves each resource as an individual JSON file. It uses a **Write-and-Rename** strategy to ensure files are never corrupted if the process is interrupted.
 
 ---
 
 ## 🌟 Key Features
 
-* **6-Field Cron Scheduling**: High-precision scheduling allowing for second-level granularity (e.g., `0 */5 * * * *`).
-* **Cursor-Based Pagination**: Automatically handles large datasets by following Asana's `next_page` tokens, ensuring no data is missed in high-volume environments.
-* **Smart Retries**: Implements exponential backoff with jitter and full support for the `Retry-After` header sent by the Asana API.
-* **Concurrency Control**: Separates Read (GET) and Write (POST/PUT) limits to maximize throughput without triggering account "Concurrent Request" bans.
-* **Graceful Shutdown**: Listens for OS signals (SIGINT, SIGTERM) to stop the scheduler cleanly, ensuring current file writes complete before exiting.
+* **Actor-Based Concurrency**: Thread-safe state management without Mutex contention.
+* **6-Field Cron Scheduling**: High-precision scheduling with second-level granularity (e.g., `0 */5 * * * *`).
+* **Cursor-Based Pagination**: Automatically handles large datasets by following Asana's `next_page` tokens.
+* **Smart Retries**: Exponential backoff with jitter and full support for the `Retry-After` header.
+* **Graceful Shutdown**: Listens for OS signals (`SIGINT`, `SIGTERM`) to stop the scheduler cleanly after current file writes complete.
 
 ---
 
@@ -60,13 +120,13 @@ The application operates as a scheduled service that performs the following:
 | **Concurrency** | 50 Read / 15 Write | Enforced via internal semaphores to prevent API-side connection rejection. |
 | **Pagination** | 100 items/page | Set to Asana's maximum page size to minimize network round-trips. |
 | **Scheduling** | 1 Second | Minimum supported interval between extractions due to 6-field cron parser. |
-| **Storage** | File System | Extraction speed is ultimately bounded by disk IOPS when writing thousands of small JSON files. |
+| **Storage** | File System | Extraction speed is bounded by disk IOPS when writing thousands of small JSON files. |
 
 ---
 
 ## ⚙️ Full Configuration Guide
 
-The following variables are available in your `.env` file:
+Available variables in your `.env` file:
 
 ### Required Variables
 | Variable | Example | Description |
@@ -103,7 +163,7 @@ The following variables are available in your `.env` file:
 
 ## 📂 Output Structure
 
-Resources are stored in subdirectories based on type. Files are named using the Asana GID.
+Resources are stored in subdirectories named by the Asana GID.
 
 ```text
 output/
