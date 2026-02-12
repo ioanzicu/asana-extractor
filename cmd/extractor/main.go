@@ -18,18 +18,31 @@ import (
 )
 
 func main() {
+	// Create a context that is canceled when the OS sends an interrupt signal
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx); err != nil {
+		log.Fatalf("Application failed: %v", err)
+	}
+
+	log.Println("Extractor stopped gracefully")
+}
+
+// run handles initialization and execution. It is now exported/visible to tests.
+func run(ctx context.Context) error {
 	log.Println("Starting Asana Extractor...")
 
-	// Load configuration
+	// 1. Load configuration
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("Failed to load configuration: %v", err)
+		return err
 	}
 
 	log.Printf("Configuration loaded: workspace=%s, schedule=%s, output=%s",
 		cfg.AsanaWorkspace, cfg.ScheduleCron, cfg.OutputDirectory)
 
-	// Create HTTP client with rate limiting and retry logic
+	// 2. Build Dependencies
 	httpClient := client.New(client.Config{
 		Token: cfg.AsanaToken,
 		RateLimitConfig: ratelimit.Config{
@@ -46,22 +59,20 @@ func main() {
 		BaseURL: cfg.BaseURL,
 	})
 
-	// Create Asana API client
 	asanaClient := asana.NewClient(httpClient, cfg.AsanaWorkspace, cfg.BaseURL, cfg.UserPageSize)
 
-	// Create storage
 	stor, err := storage.NewJSONStorage(cfg.OutputDirectory)
 	if err != nil {
-		log.Fatalf("Failed to create storage: %v", err)
+		return err
 	}
 
-	// Create extractor
 	ext := extractor.New(asanaClient, stor)
 
-	// Create extraction job
+	// 3. Define the Job
 	extractionJob := func() {
-		ctx := context.Background()
-		stats, err := ext.Extract(ctx)
+		// Use a background context for the job itself, or pass ctx if you want
+		// the job to be interrupted mid-flight during shutdown.
+		stats, err := ext.Extract(context.Background())
 		if err != nil {
 			log.Printf("Extraction failed: %v", err)
 			return
@@ -71,32 +82,14 @@ func main() {
 			stats.UsersExtracted, stats.ProjectsExtracted, stats.Errors, stats.Duration)
 	}
 
-	// Run initial extraction
+	// 4. Run initial extraction
 	log.Println("Running initial extraction...")
 	extractionJob()
 
-	// Create scheduler
+	// 5. Start Scheduler
 	sched := scheduler.NewCronScheduler(cfg.ScheduleCron)
-
-	// Set up context for graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Handle shutdown signals
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
-	go func() {
-		<-sigChan
-		log.Println("Received shutdown signal...")
-		cancel()
-	}()
-
-	// Start scheduler
 	log.Println("Starting scheduler...")
-	if err := sched.Start(ctx, extractionJob); err != nil {
-		log.Fatalf("Scheduler error: %v", err)
-	}
 
-	log.Println("Extractor stopped gracefully")
+	// This will block until the context is canceled (via SIGINT/SIGTERM)
+	return sched.Start(ctx, extractionJob)
 }
