@@ -63,17 +63,16 @@ func TestGetUsers(t *testing.T) {
 		RetryConfig: retry.DefaultConfig(),
 	})
 
-	// Override base URL for testing
-	originalBaseURL := baseURL
-	defer func() { baseURL = originalBaseURL }()
-	baseURL = server.URL + "/api/1.0"
-
-	asanaClient := NewClient(httpClient, "test-workspace")
+	asanaClient := NewClient(httpClient, "test-workspace", server.URL+"/api/1.0", 10)
 
 	// Test GetUsers
-	users, err := asanaClient.GetUsers(context.Background(), 10, 0)
+	users, nextPage, err := asanaClient.GetUsers(context.Background(), 10, "0")
 	if err != nil {
 		t.Fatalf("GetUsers() error = %v", err)
+	}
+
+	if nextPage != nil {
+		t.Errorf("Expected nextPage to be nil, got %v", nextPage)
 	}
 
 	if len(users) != 2 {
@@ -100,12 +99,17 @@ func TestGetAllUsers_Pagination(t *testing.T) {
 		var resp UsersResponse
 
 		switch offset {
-		case "0":
+		case "":
 			// First page
 			resp = UsersResponse{
 				Data: []User{
 					{GID: "1", Name: "User 1"},
 					{GID: "2", Name: "User 2"},
+				},
+				NextPage: &NextPage{
+					Offset: "2",
+					Path:   "/users",
+					Uri:    "/users",
 				},
 			}
 		case "2":
@@ -114,6 +118,7 @@ func TestGetAllUsers_Pagination(t *testing.T) {
 				Data: []User{
 					{GID: "3", Name: "User 3"},
 				},
+				NextPage: nil,
 			}
 		default:
 			// Empty page
@@ -138,12 +143,7 @@ func TestGetAllUsers_Pagination(t *testing.T) {
 		RetryConfig: retry.DefaultConfig(),
 	})
 
-	// Override base URL
-	originalBaseURL := baseURL
-	defer func() { baseURL = originalBaseURL }()
-	baseURL = server.URL + "/api/1.0"
-
-	asanaClient := NewClient(httpClient, "test-workspace")
+	asanaClient := NewClient(httpClient, "test-workspace", server.URL+"/api/1.0", 10)
 
 	// Test GetAllUsers
 	users, err := asanaClient.GetAllUsers(context.Background())

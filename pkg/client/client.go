@@ -25,6 +25,7 @@ type Config struct {
 	RateLimitConfig ratelimit.Config
 	RetryConfig     retry.Config
 	Timeout         time.Duration
+	BaseURL         string
 }
 
 // New creates a new HTTP client with rate limiting and retry logic

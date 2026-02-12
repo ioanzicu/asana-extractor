@@ -43,10 +43,11 @@ func main() {
 			MaxBackoff:     cfg.MaxBackoff,
 		},
 		Timeout: cfg.HTTPTimeout,
+		BaseURL: cfg.BaseURL,
 	})
 
 	// Create Asana API client
-	asanaClient := asana.NewClient(httpClient, cfg.AsanaWorkspace)
+	asanaClient := asana.NewClient(httpClient, cfg.AsanaWorkspace, cfg.BaseURL, cfg.UserPageSize)
 
 	// Create storage
 	stor, err := storage.NewJSONStorage(cfg.OutputDirectory)

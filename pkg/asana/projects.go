@@ -10,7 +10,7 @@ import (
 // GetProjects retrieves projects with pagination
 func (c *Client) GetProjects(ctx context.Context, limit int, offset string) ([]Project, *NextPage, error) {
 	// Build URL with query parameters
-	u, err := url.Parse(fmt.Sprintf("%s/workspaces/%s/projects", baseURL, c.workspace))
+	u, err := url.Parse(fmt.Sprintf("%s/workspaces/%s/projects", c.baseURL, c.workspace))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse URL: %w", err)
 	}

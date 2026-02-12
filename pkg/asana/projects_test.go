@@ -3,6 +3,7 @@ package asana
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -68,15 +69,10 @@ func TestGetProjects(t *testing.T) {
 		RetryConfig: retry.DefaultConfig(),
 	})
 
-	// Override base URL for testing
-	originalBaseURL := baseURL
-	defer func() { baseURL = originalBaseURL }()
-	baseURL = server.URL + "/api/1.0"
-
-	asanaClient := NewClient(httpClient, "test-workspace")
+	asanaClient := NewClient(httpClient, "test-workspace", server.URL+"/api/1.0", 10)
 
 	// Test GetProjects
-	projects, err := asanaClient.GetProjects(context.Background(), 10, 0)
+	projects, _, err := asanaClient.GetProjects(context.Background(), 10, "0")
 	if err != nil {
 		t.Fatalf("GetProjects() error = %v", err)
 	}
@@ -109,25 +105,24 @@ func TestGetAllProjects_Pagination(t *testing.T) {
 		var resp ProjectsResponse
 
 		switch offset {
-		case "0":
+		case "":
 			// First page (full page of 100)
 			projects := make([]Project, 100)
 			for i := 0; i < 100; i++ {
 				projects[i] = Project{
-					GID:        string(rune('0' + i)),
-					Name:       "Project " + string(rune('0'+i)),
-					CreatedAt:  time.Now(),
-					ModifiedAt: time.Now(),
+					GID:  fmt.Sprintf("%d", i),
+					Name: fmt.Sprintf("Project %d", i),
 				}
 			}
-			resp = ProjectsResponse{Data: projects}
-		case "100":
+			resp = ProjectsResponse{Data: projects, NextPage: &NextPage{Offset: "token_for_page_2"}}
+		case "token_for_page_2":
 			// Second page (partial page)
 			resp = ProjectsResponse{
 				Data: []Project{
-					{GID: "101", Name: "Project 101", CreatedAt: time.Now(), ModifiedAt: time.Now()},
-					{GID: "102", Name: "Project 102", CreatedAt: time.Now(), ModifiedAt: time.Now()},
+					{GID: "101", Name: "Project 101"},
+					{GID: "102", Name: "Project 102"},
 				},
+				NextPage: nil,
 			}
 		default:
 			// Empty page
@@ -150,12 +145,7 @@ func TestGetAllProjects_Pagination(t *testing.T) {
 		RetryConfig: retry.DefaultConfig(),
 	})
 
-	// Override base URL
-	originalBaseURL := baseURL
-	defer func() { baseURL = originalBaseURL }()
-	baseURL = server.URL + "/api/1.0"
-
-	asanaClient := NewClient(httpClient, "test-workspace")
+	asanaClient := NewClient(httpClient, "test-workspace", server.URL+"/api/1.0", 100)
 
 	// Test GetAllProjects
 	projects, err := asanaClient.GetAllProjects(context.Background())

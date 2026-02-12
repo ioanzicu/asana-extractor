@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 func TestLimiter_Acquire(t *testing.T) {
@@ -157,15 +159,19 @@ func TestLimiter_ThreadSafety(t *testing.T) {
 }
 
 func TestLimiter_RateLimit(t *testing.T) {
-	cfg := Config{
-		RequestsPerMinute:  60, // 1 per second
-		MaxConcurrentRead:  100,
-		MaxConcurrentWrite: 100,
+	// To see the delay with only 3 requests,
+	// we set the "burst" to 1.
+	requestsPerMinute := 60
+	requestsPerSecond := float64(requestsPerMinute) / 60.0
+
+	limiter := &Limiter{
+		// Burst is set to 1 here
+		rateLimiter:        rate.NewLimiter(rate.Limit(requestsPerSecond), 1),
+		maxConcurrentRead:  100,
+		maxConcurrentWrite: 100,
 	}
 
-	limiter := NewLimiter(cfg)
 	ctx := context.Background()
-
 	start := time.Now()
 
 	// Make 3 requests (should take ~2 seconds due to rate limiting)

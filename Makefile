@@ -31,6 +31,7 @@ run:
 clean:
 	@echo "Cleaning..."
 	@rm -rf bin/
+	@rm -rf ./output/
 	@rm -f coverage.out coverage.html
 
 # Lint the code

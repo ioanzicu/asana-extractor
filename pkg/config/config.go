@@ -28,7 +28,9 @@ type Config struct {
 	MaxConcurrentWrite int
 
 	// HTTP client configuration
-	HTTPTimeout time.Duration
+	HTTPTimeout  time.Duration
+	BaseURL      string
+	UserPageSize int
 
 	// Retry configuration
 	MaxRetries     int
@@ -54,6 +56,8 @@ func Load() (*Config, error) {
 		MaxConcurrentRead:  getEnvInt("MAX_CONCURRENT_READ", 50),
 		MaxConcurrentWrite: getEnvInt("MAX_CONCURRENT_WRITE", 15),
 		HTTPTimeout:        getEnvDuration("HTTP_TIMEOUT", 30*time.Second),
+		BaseURL:            getEnv("BASE_URL", "https://app.asana.com/api/1.0"),
+		UserPageSize:       getEnvInt("USER_PAGE_SIZE", 100),
 		MaxRetries:         getEnvInt("MAX_RETRIES", 5),
 		InitialBackoff:     getEnvDuration("INITIAL_BACKOFF", 1*time.Second),
 		MaxBackoff:         getEnvDuration("MAX_BACKOFF", 60*time.Second),
