@@ -42,10 +42,7 @@ type Config struct {
 func Load() (*Config, error) {
 	err := godotenv.Load()
 	if err != nil {
-		// We don't necessarily want to return an error here because
-		// in production, variables are often set via the OS/Docker
-		// without a .env file.
-		log.Fatal("No .env file found, fetching from system environment")
+		log.Println("No .env file found, fetching from system environment")
 	}
 
 	cfg := &Config{

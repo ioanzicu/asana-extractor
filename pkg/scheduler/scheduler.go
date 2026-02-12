@@ -23,7 +23,7 @@ type CronScheduler struct {
 func NewCronScheduler(cronExpr string) *CronScheduler {
 	return &CronScheduler{
 		cronExpr: cronExpr,
-		cron:     cron.New(),
+		cron:     cron.New(cron.WithSeconds()),
 	}
 }
 

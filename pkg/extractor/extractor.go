@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/ioanzicu/asana-extractor/pkg/asana"
-	"github.com/ioanzicu/asana-extractor/pkg/storage"
 )
 
 // Stats holds extraction statistics
@@ -18,14 +17,26 @@ type Stats struct {
 	Duration          time.Duration
 }
 
+// AsanaClient defines the subset of Asana operations the extractor needs.
+type AsanaClient interface {
+	GetAllUsers(ctx context.Context) ([]asana.User, error)
+	GetAllProjects(ctx context.Context) ([]asana.Project, error)
+}
+
+// Storage defines the interface for storing extracted data
+type Storage interface {
+	WriteUser(user asana.User) error
+	WriteProject(project asana.Project) error
+}
+
 // Extractor orchestrates the extraction process
 type Extractor struct {
-	asanaClient *asana.Client
-	storage     storage.Storage
+	asanaClient AsanaClient
+	storage     Storage
 }
 
 // New creates a new extractor
-func New(asanaClient *asana.Client, storage storage.Storage) *Extractor {
+func New(asanaClient AsanaClient, storage Storage) *Extractor {
 	return &Extractor{
 		asanaClient: asanaClient,
 		storage:     storage,

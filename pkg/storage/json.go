@@ -9,12 +9,6 @@ import (
 	"github.com/ioanzicu/asana-extractor/pkg/asana"
 )
 
-// Storage defines the interface for storing extracted data
-type Storage interface {
-	WriteUser(user asana.User) error
-	WriteProject(project asana.Project) error
-}
-
 // JSONStorage implements Storage by writing individual JSON files
 type JSONStorage struct {
 	baseDir string

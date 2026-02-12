@@ -16,6 +16,7 @@ test-coverage:
 	@echo "Running tests with coverage..."
 	@go test ./... -cover -coverprofile=coverage.out
 	@go tool cover -html=coverage.out -o coverage.html
+	@open coverage.html
 
 # Run tests with race detection
 test-race:
