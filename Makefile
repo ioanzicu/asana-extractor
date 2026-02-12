@@ -9,7 +9,7 @@ build:
 # Run tests
 test:
 	@echo "Running tests..."
-	@go test ./... -v
+	@go test ./... -v -race
 
 # Run tests with coverage
 test-coverage:

@@ -10,180 +10,142 @@ import (
 )
 
 func TestNewJSONStorage(t *testing.T) {
-	// Create temporary directory
 	tmpDir := t.TempDir()
 
-	storage, err := NewJSONStorage(tmpDir)
-	if err != nil {
-		t.Fatalf("NewJSONStorage() error = %v", err)
+	tests := []struct {
+		name    string
+		baseDir string
+		wantErr bool
+	}{
+		{
+			name:    "Successful creation",
+			baseDir: tmpDir,
+			wantErr: false,
+		},
+		{
+			name:    "Nested directory creation",
+			baseDir: filepath.Join(tmpDir, "level1", "level2"),
+			wantErr: false,
+		},
+		// Note: testing a failure usually requires a read-only path
+		// which is OS-dependent, but MkdirAll rarely fails on TempDir.
 	}
 
-	// Verify directories were created
-	usersDir := filepath.Join(tmpDir, "users")
-	projectsDir := filepath.Join(tmpDir, "projects")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewJSONStorage(tt.baseDir)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("NewJSONStorage() error = %v, wantErr %v", err, tt.wantErr)
+			}
 
-	if _, err := os.Stat(usersDir); os.IsNotExist(err) {
-		t.Error("Users directory was not created")
-	}
-
-	if _, err := os.Stat(projectsDir); os.IsNotExist(err) {
-		t.Error("Projects directory was not created")
-	}
-
-	if storage.baseDir != tmpDir {
-		t.Errorf("Expected baseDir=%s, got %s", tmpDir, storage.baseDir)
+			if !tt.wantErr {
+				// Verify structure
+				for _, sub := range []string{"users", "projects"} {
+					path := filepath.Join(tt.baseDir, sub)
+					if _, err := os.Stat(path); os.IsNotExist(err) {
+						t.Errorf("directory %s was not created", sub)
+					}
+				}
+			}
+		})
 	}
 }
 
-func TestWriteUser(t *testing.T) {
+func TestWriteOperations(t *testing.T) {
 	tmpDir := t.TempDir()
-	storage, err := NewJSONStorage(tmpDir)
-	if err != nil {
-		t.Fatalf("NewJSONStorage() error = %v", err)
-	}
+	storage, _ := NewJSONStorage(tmpDir)
 
-	// Create test user
-	user := asana.User{
-		GID:   "123456",
-		Name:  "Test User",
-		Email: "test@example.com",
-	}
+	t.Run("WriteUser_Table", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			user    asana.User
+			wantErr bool
+		}{
+			{
+				name: "Standard user",
+				user: asana.User{GID: "123", Name: "John Doe", Email: "john@example.com"},
+			},
+			{
+				name: "User with special characters in GID",
+				user: asana.User{GID: "user-!@#", Name: "Special"},
+			},
+			{
+				name: "Overwrite existing user",
+				user: asana.User{GID: "123", Name: "John Updated"},
+			},
+		}
 
-	// Write user
-	err = storage.WriteUser(user)
-	if err != nil {
-		t.Fatalf("WriteUser() error = %v", err)
-	}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				err := storage.WriteUser(tt.user)
+				if (err != nil) != tt.wantErr {
+					t.Errorf("WriteUser() error = %v, wantErr %v", err, tt.wantErr)
+				}
 
-	// Verify file was created
-	filename := filepath.Join(tmpDir, "users", "123456.json")
-	if _, err := os.Stat(filename); os.IsNotExist(err) {
-		t.Fatal("User file was not created")
-	}
+				// Verify file content
+				path := filepath.Join(tmpDir, "users", tt.user.GID+".json")
+				data, _ := os.ReadFile(path)
+				var saved asana.User
+				json.Unmarshal(data, &saved)
+				if saved.Name != tt.user.Name {
+					t.Errorf("Expected name %s, got %s", tt.user.Name, saved.Name)
+				}
+			})
+		}
+	})
 
-	// Read and verify content
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		t.Fatalf("Failed to read user file: %v", err)
-	}
+	t.Run("WriteProject_Table", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			project asana.Project
+		}{
+			{
+				name:    "Standard project",
+				project: asana.Project{GID: "p1", Name: "Alpha"},
+			},
+			{
+				name:    "Archived project",
+				project: asana.Project{GID: "p2", Name: "Beta", Archived: true},
+			},
+		}
 
-	var readUser asana.User
-	if err := json.Unmarshal(data, &readUser); err != nil {
-		t.Fatalf("Failed to unmarshal user: %v", err)
-	}
-
-	if readUser.GID != user.GID {
-		t.Errorf("Expected GID=%s, got %s", user.GID, readUser.GID)
-	}
-
-	if readUser.Name != user.Name {
-		t.Errorf("Expected Name=%s, got %s", user.Name, readUser.Name)
-	}
-
-	if readUser.Email != user.Email {
-		t.Errorf("Expected Email=%s, got %s", user.Email, readUser.Email)
-	}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				if err := storage.WriteProject(tt.project); err != nil {
+					t.Errorf("WriteProject() failed: %v", err)
+				}
+			})
+		}
+	})
 }
 
-func TestWriteProject(t *testing.T) {
+func TestWriteJSON_Errors(t *testing.T) {
 	tmpDir := t.TempDir()
-	storage, err := NewJSONStorage(tmpDir)
-	if err != nil {
-		t.Fatalf("NewJSONStorage() error = %v", err)
+	s := &JSONStorage{baseDir: tmpDir}
+
+	tests := []struct {
+		name     string
+		filename string
+		data     interface{}
+	}{
+		{
+			name:     "Marshaling error",
+			filename: filepath.Join(tmpDir, "error.json"),
+			data:     make(chan int), // Channels cannot be marshaled to JSON
+		},
+		{
+			name:     "Invalid path error",
+			filename: filepath.Join("/nonexistent", "error.json"),
+			data:     map[string]string{"foo": "bar"},
+		},
 	}
 
-	// Create test project
-	project := asana.Project{
-		GID:      "proj123",
-		Name:     "Test Project",
-		Archived: false,
-		Public:   true,
-	}
-
-	// Write project
-	err = storage.WriteProject(project)
-	if err != nil {
-		t.Fatalf("WriteProject() error = %v", err)
-	}
-
-	// Verify file was created
-	filename := filepath.Join(tmpDir, "projects", "proj123.json")
-	if _, err := os.Stat(filename); os.IsNotExist(err) {
-		t.Fatal("Project file was not created")
-	}
-
-	// Read and verify content
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		t.Fatalf("Failed to read project file: %v", err)
-	}
-
-	var readProject asana.Project
-	if err := json.Unmarshal(data, &readProject); err != nil {
-		t.Fatalf("Failed to unmarshal project: %v", err)
-	}
-
-	if readProject.GID != project.GID {
-		t.Errorf("Expected GID=%s, got %s", project.GID, readProject.GID)
-	}
-
-	if readProject.Name != project.Name {
-		t.Errorf("Expected Name=%s, got %s", project.Name, readProject.Name)
-	}
-
-	if readProject.Archived != project.Archived {
-		t.Errorf("Expected Archived=%v, got %v", project.Archived, readProject.Archived)
-	}
-}
-
-func TestWriteUser_Overwrite(t *testing.T) {
-	tmpDir := t.TempDir()
-	storage, err := NewJSONStorage(tmpDir)
-	if err != nil {
-		t.Fatalf("NewJSONStorage() error = %v", err)
-	}
-
-	// Write first version
-	user1 := asana.User{
-		GID:   "123",
-		Name:  "Original Name",
-		Email: "original@example.com",
-	}
-
-	err = storage.WriteUser(user1)
-	if err != nil {
-		t.Fatalf("First WriteUser() error = %v", err)
-	}
-
-	// Write updated version
-	user2 := asana.User{
-		GID:   "123",
-		Name:  "Updated Name",
-		Email: "updated@example.com",
-	}
-
-	err = storage.WriteUser(user2)
-	if err != nil {
-		t.Fatalf("Second WriteUser() error = %v", err)
-	}
-
-	// Verify file contains updated data
-	filename := filepath.Join(tmpDir, "users", "123.json")
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		t.Fatalf("Failed to read user file: %v", err)
-	}
-
-	var readUser asana.User
-	if err := json.Unmarshal(data, &readUser); err != nil {
-		t.Fatalf("Failed to unmarshal user: %v", err)
-	}
-
-	if readUser.Name != "Updated Name" {
-		t.Errorf("Expected updated name, got %s", readUser.Name)
-	}
-
-	if readUser.Email != "updated@example.com" {
-		t.Errorf("Expected updated email, got %s", readUser.Email)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := s.writeJSON(tt.filename, tt.data)
+			if err == nil {
+				t.Error("expected error but got nil")
+			}
+		})
 	}
 }

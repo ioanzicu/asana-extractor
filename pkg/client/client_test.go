@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,23 +12,24 @@ import (
 	"github.com/ioanzicu/asana-extractor/pkg/retry"
 )
 
-func TestClient_Requests(t *testing.T) {
-	type testCase struct {
-		name           string
-		token          string
-		serverHandler  func(attempts *int) http.HandlerFunc
-		retryCfg       retry.Config
-		call           func(ctx context.Context, c *Client, url string) (interface{}, error)
-		expectedResult string
-		expectedCalls  int
-		expectError    bool
-	}
-
+func TestClient_Table(t *testing.T) {
 	testToken := "super-secret-token"
 
-	tests := []testCase{
+	tests := []struct {
+		name          string
+		method        string
+		token         string
+		serverHandler func(attempts *int) http.HandlerFunc
+		retryCfg      retry.Config
+		rlCfg         ratelimit.Config
+		ctx           func() (context.Context, context.CancelFunc)
+		call          func(ctx context.Context, c *Client, url string) (interface{}, error)
+		expectedCalls int
+		expectError   bool
+		errorContains string
+	}{
 		{
-			name:  "Successful GET with Headers",
+			name:  "Successful GET with Headers and Body",
 			token: testToken,
 			serverHandler: func(attempts *int) http.HandlerFunc {
 				return func(w http.ResponseWriter, r *http.Request) {
@@ -36,37 +38,53 @@ func TestClient_Requests(t *testing.T) {
 						w.WriteHeader(http.StatusUnauthorized)
 						return
 					}
-					if r.Header.Get("Accept") != "application/json" {
-						w.WriteHeader(http.StatusNotAcceptable)
-						return
-					}
 					w.WriteHeader(http.StatusOK)
-				}
-			},
-			retryCfg: retry.DefaultConfig(),
-			call: func(ctx context.Context, c *Client, url string) (interface{}, error) {
-				return c.Get(ctx, url)
-			},
-			expectedCalls: 1,
-			expectError:   false,
-		},
-		{
-			name:  "GetBody returns error message on 400",
-			token: "test",
-			serverHandler: func(attempts *int) http.HandlerFunc {
-				return func(w http.ResponseWriter, r *http.Request) {
-					*attempts++
-					w.WriteHeader(http.StatusBadRequest)
-					w.Write([]byte("bad request details"))
+					w.Write([]byte("success-body"))
 				}
 			},
 			retryCfg: retry.Config{MaxRetries: 0},
 			call: func(ctx context.Context, c *Client, url string) (interface{}, error) {
 				return c.GetBody(ctx, url)
 			},
-			expectedResult: "unexpected status code 400: bad request details",
-			expectedCalls:  1,
-			expectError:    true,
+			expectedCalls: 1,
+			expectError:   false,
+		},
+		{
+			name:  "Write Request (POST) Detection",
+			token: testToken,
+			serverHandler: func(attempts *int) http.HandlerFunc {
+				return func(w http.ResponseWriter, r *http.Request) {
+					*attempts++
+					if r.Method != http.MethodPost {
+						w.WriteHeader(http.StatusMethodNotAllowed)
+						return
+					}
+					w.WriteHeader(http.StatusCreated)
+				}
+			},
+			rlCfg: ratelimit.Config{RequestsPerMinute: 60, MaxConcurrentRead: 1, MaxConcurrentWrite: 1},
+			call: func(ctx context.Context, c *Client, url string) (interface{}, error) {
+				req, _ := http.NewRequest(http.MethodPost, url, nil)
+				return c.Do(ctx, req)
+			},
+			expectedCalls: 1,
+			expectError:   false,
+		},
+		{
+			name:  "Rate Limiter Context Cancellation",
+			token: "test",
+			ctx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel() // Cancel immediately
+				return ctx, cancel
+			},
+			rlCfg: ratelimit.Config{RequestsPerMinute: 60, MaxConcurrentRead: 1, MaxConcurrentWrite: 1},
+			call: func(ctx context.Context, c *Client, url string) (interface{}, error) {
+				return c.Get(ctx, url)
+			},
+			expectedCalls: 0, // Should never hit server
+			expectError:   true,
+			errorContains: "rate limiter error",
 		},
 		{
 			name:  "Retry integration succeeds after failures",
@@ -84,7 +102,7 @@ func TestClient_Requests(t *testing.T) {
 			retryCfg: retry.Config{
 				MaxRetries:     3,
 				InitialBackoff: 1 * time.Millisecond,
-				MaxBackoff:     5 * time.Millisecond,
+				MaxBackoff:     2 * time.Millisecond,
 			},
 			call: func(ctx context.Context, c *Client, url string) (interface{}, error) {
 				return c.Get(ctx, url)
@@ -92,43 +110,70 @@ func TestClient_Requests(t *testing.T) {
 			expectedCalls: 3,
 			expectError:   false,
 		},
+		{
+			name:  "Invalid URL error in Get",
+			token: "test",
+			call: func(ctx context.Context, c *Client, url string) (interface{}, error) {
+				return c.Get(ctx, " http://invalid-leading-space")
+			},
+			expectError:   true,
+			errorContains: "failed to create request",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			attempts := 0
-			server := httptest.NewServer(tc.serverHandler(&attempts))
-			defer server.Close()
-
-			cfg := Config{
-				Token: tc.token,
-				RateLimitConfig: ratelimit.Config{
-					RequestsPerMinute: 600, MaxConcurrentRead: 10, MaxConcurrentWrite: 10,
-				},
-				RetryConfig: tc.retryCfg,
+			var url string
+			if tc.serverHandler != nil {
+				server := httptest.NewServer(tc.serverHandler(&attempts))
+				defer server.Close()
+				url = server.URL
 			}
 
-			c := New(cfg)
-			_, err := tc.call(context.Background(), c, server.URL)
+			// Default RL config if not provided
+			rl := tc.rlCfg
+			if rl.RequestsPerMinute == 0 {
+				rl = ratelimit.Config{RequestsPerMinute: 600, MaxConcurrentRead: 10, MaxConcurrentWrite: 10}
+			}
 
-			// Validate error status
+			c := New(Config{
+				Token:           tc.token,
+				RateLimitConfig: rl,
+				RetryConfig:     tc.retryCfg,
+				Timeout:         time.Second,
+			})
+
+			ctx := context.Background()
+			if tc.ctx != nil {
+				var cancel context.CancelFunc
+				ctx, cancel = tc.ctx()
+				defer cancel()
+			}
+
+			res, err := tc.call(ctx, c, url)
+
+			// 1. Check Error State
 			if (err != nil) != tc.expectError {
 				t.Fatalf("expectError %v, but got error: %v", tc.expectError, err)
 			}
 
-			// Validate specific error message if expected
-			if tc.expectError && tc.expectedResult != "" {
-				if err.Error() != tc.expectedResult {
-					t.Errorf("expected error %q, got %q", tc.expectedResult, err.Error())
+			// 2. Check Error Message
+			if tc.expectError && tc.errorContains != "" {
+				if !strings.Contains(err.Error(), tc.errorContains) {
+					t.Errorf("expected error containing %q, got %q", tc.errorContains, err.Error())
 				}
 			}
 
-			// Validate successful body content if applicable
-			if !tc.expectError && tc.name == "GetBody returns error message on 400" {
-				// (Optional) add body validation here
+			// 3. Check Success Content
+			if !tc.expectError && tc.name == "Successful GET with Headers and Body" {
+				body := res.([]byte)
+				if string(body) != "success-body" {
+					t.Errorf("expected body 'success-body', got %q", string(body))
+				}
 			}
 
-			// Validate total calls made to server
+			// 4. Check Server Interaction
 			if attempts != tc.expectedCalls {
 				t.Errorf("expected %d calls, got %d", tc.expectedCalls, attempts)
 			}

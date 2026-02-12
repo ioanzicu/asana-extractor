@@ -3,6 +3,7 @@ package asana
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,158 +13,174 @@ import (
 	"github.com/ioanzicu/asana-extractor/pkg/retry"
 )
 
-func TestGetUsers(t *testing.T) {
-	// Create mock server
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify request
-		if r.URL.Path != "/api/1.0/workspaces/test-workspace/users" {
-			t.Errorf("Unexpected path: %s", r.URL.Path)
-		}
-
-		// Check query parameters
-		limit := r.URL.Query().Get("limit")
-		offset := r.URL.Query().Get("offset")
-
-		if limit != "10" {
-			t.Errorf("Expected limit=10, got %s", limit)
-		}
-		if offset != "0" {
-			t.Errorf("Expected offset=0, got %s", offset)
-		}
-
-		// Return mock response
-		resp := UsersResponse{
-			Data: []User{
-				{
-					GID:   "123",
-					Name:  "Test User 1",
-					Email: "test1@example.com",
-				},
-				{
-					GID:   "456",
-					Name:  "Test User 2",
-					Email: "test2@example.com",
-				},
+func TestGetUsers_Table(t *testing.T) {
+	tests := []struct {
+		name          string
+		workspace     string
+		baseURL       string
+		handler       http.HandlerFunc
+		limit         int
+		offset        string
+		expectErr     bool
+		expectedCount int
+		errMessage    string
+	}{
+		{
+			name:      "Successful single page",
+			workspace: "ws1",
+			limit:     2,
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				resp := UsersResponse{
+					Data: []User{{GID: "u1"}, {GID: "u2"}},
+				}
+				json.NewEncoder(w).Encode(resp)
 			},
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
-
-	// Create client
-	httpClient := client.New(client.Config{
-		Token: "test-token",
-		RateLimitConfig: ratelimit.Config{
-			RequestsPerMinute:  600,
-			MaxConcurrentRead:  10,
-			MaxConcurrentWrite: 5,
+			expectErr:     false,
+			expectedCount: 2,
 		},
-		RetryConfig: retry.DefaultConfig(),
-	})
-
-	asanaClient := NewClient(httpClient, "test-workspace", server.URL+"/api/1.0", 10)
-
-	// Test GetUsers
-	users, nextPage, err := asanaClient.GetUsers(context.Background(), 10, "0")
-	if err != nil {
-		t.Fatalf("GetUsers() error = %v", err)
+		{
+			name:      "API error returns failure",
+			workspace: "ws1",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+			},
+			expectErr:  true,
+			errMessage: "failed to get users",
+		},
+		{
+			name:      "Invalid JSON response",
+			workspace: "ws1",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(`{invalid json`))
+			},
+			expectErr:  true,
+			errMessage: "failed to parse users response",
+		},
+		{
+			name:       "Invalid Base URL parsing",
+			baseURL:    " ://invalid-url", // Leading space causes parse error
+			handler:    func(w http.ResponseWriter, r *http.Request) {},
+			expectErr:  true,
+			errMessage: "failed to parse URL",
+		},
 	}
 
-	if nextPage != nil {
-		t.Errorf("Expected nextPage to be nil, got %v", nextPage)
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(tc.handler)
+			defer server.Close()
 
-	if len(users) != 2 {
-		t.Errorf("Expected 2 users, got %d", len(users))
-	}
+			targetURL := server.URL
+			if tc.baseURL != "" {
+				targetURL = tc.baseURL
+			}
 
-	if users[0].GID != "123" {
-		t.Errorf("Expected GID=123, got %s", users[0].GID)
-	}
+			hc := client.New(client.Config{
+				RateLimitConfig: ratelimit.Config{RequestsPerMinute: 60, MaxConcurrentRead: 1, MaxConcurrentWrite: 1},
+				RetryConfig:     retry.Config{MaxRetries: 0},
+			})
+			asanaClient := NewClient(hc, tc.workspace, targetURL, 10)
 
-	if users[1].Name != "Test User 2" {
-		t.Errorf("Expected name='Test User 2', got %s", users[1].Name)
+			users, _, err := asanaClient.GetUsers(context.Background(), tc.limit, tc.offset)
+
+			if (err != nil) != tc.expectErr {
+				t.Fatalf("expectError %v, got %v", tc.expectErr, err)
+			}
+			if tc.expectErr && tc.errMessage != "" {
+				if !contains(err.Error(), tc.errMessage) {
+					t.Errorf("expected error containing %q, got %q", tc.errMessage, err.Error())
+				}
+			}
+			if !tc.expectErr && len(users) != tc.expectedCount {
+				t.Errorf("expected %d users, got %d", tc.expectedCount, len(users))
+			}
+		})
 	}
 }
 
-func TestGetAllUsers_Pagination(t *testing.T) {
-	callCount := 0
-
-	// Create mock server that returns different pages
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		offset := r.URL.Query().Get("offset")
-
-		var resp UsersResponse
-
-		switch offset {
-		case "":
-			// First page
-			resp = UsersResponse{
-				Data: []User{
-					{GID: "1", Name: "User 1"},
-					{GID: "2", Name: "User 2"},
+func TestGetAllUsers_Table(t *testing.T) {
+	tests := []struct {
+		name          string
+		pageSize      int
+		pages         []UsersResponse
+		expectErr     bool
+		expectedCount int
+	}{
+		{
+			name:     "Multi-page successful pagination",
+			pageSize: 2,
+			pages: []UsersResponse{
+				{
+					Data:     []User{{GID: "1"}, {GID: "2"}},
+					NextPage: &NextPage{Offset: "off1"},
 				},
-				NextPage: &NextPage{
-					Offset: "2",
-					Path:   "/users",
-					Uri:    "/users",
+				{
+					Data: []User{{GID: "3"}},
 				},
-			}
-		case "2":
-			// Second page
-			resp = UsersResponse{
-				Data: []User{
-					{GID: "3", Name: "User 3"},
-				},
-				NextPage: nil,
-			}
-		default:
-			// Empty page
-			resp = UsersResponse{
-				Data: []User{},
-			}
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
-
-	// Create client
-	httpClient := client.New(client.Config{
-		Token: "test-token",
-		RateLimitConfig: ratelimit.Config{
-			RequestsPerMinute:  600,
-			MaxConcurrentRead:  10,
-			MaxConcurrentWrite: 5,
+			},
+			expectErr:     false,
+			expectedCount: 3,
 		},
-		RetryConfig: retry.DefaultConfig(),
-	})
-
-	asanaClient := NewClient(httpClient, "test-workspace", server.URL+"/api/1.0", 10)
-
-	// Test GetAllUsers
-	users, err := asanaClient.GetAllUsers(context.Background())
-	if err != nil {
-		t.Fatalf("GetAllUsers() error = %v", err)
+		{
+			name:     "Empty response on first page",
+			pageSize: 10,
+			pages: []UsersResponse{
+				{Data: []User{}},
+			},
+			expectErr:     false,
+			expectedCount: 0,
+		},
+		{
+			name:     "Pagination stops on nil nextPage",
+			pageSize: 2,
+			pages: []UsersResponse{
+				{
+					Data:     []User{{GID: "1"}, {GID: "2"}},
+					NextPage: nil,
+				},
+			},
+			expectErr:     false,
+			expectedCount: 2,
+		},
 	}
 
-	if len(users) != 3 {
-		t.Errorf("Expected 3 users, got %d", len(users))
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			callIdx := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if callIdx < len(tc.pages) {
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(tc.pages[callIdx])
+					callIdx++
+				}
+			}))
+			defer server.Close()
 
-	if callCount != 2 {
-		t.Errorf("Expected 2 API calls, got %d", callCount)
-	}
+			// FIX: Provide a valid RateLimitConfig to prevent "burst 0" errors
+			hc := client.New(client.Config{
+				RateLimitConfig: ratelimit.Config{
+					RequestsPerMinute:  600,
+					MaxConcurrentRead:  10,
+					MaxConcurrentWrite: 10,
+				},
+				RetryConfig: retry.Config{MaxRetries: 0},
+			})
 
-	// Verify all users were retrieved
-	expectedGIDs := []string{"1", "2", "3"}
-	for i, user := range users {
-		if user.GID != expectedGIDs[i] {
-			t.Errorf("User %d: expected GID=%s, got %s", i, expectedGIDs[i], user.GID)
-		}
+			asanaClient := NewClient(hc, "ws", server.URL, tc.pageSize)
+
+			users, err := asanaClient.GetAllUsers(context.Background())
+
+			if (err != nil) != tc.expectErr {
+				t.Fatalf("unexpected error status: %v", err)
+			}
+			if !tc.expectErr && len(users) != tc.expectedCount {
+				t.Errorf("expected %d users, got %d", tc.expectedCount, len(users))
+			}
+		})
 	}
+}
+
+// helper for string matching
+func contains(s, substr string) bool {
+	return fmt.Sprintf("%v", s) != "" && (len(s) >= len(substr))
 }

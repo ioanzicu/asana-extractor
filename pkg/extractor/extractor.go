@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/ioanzicu/asana-extractor/pkg/asana"
@@ -48,52 +49,84 @@ func (e *Extractor) Extract(ctx context.Context) (*Stats, error) {
 	startTime := time.Now()
 	stats := &Stats{}
 
-	log.Println("Starting extraction...")
+	// results channel carries functions to update the stats struct safely
+	results := make(chan func(*Stats), 100)
+	// errChan captures fatal API errors
+	errChan := make(chan error, 2)
 
-	// Extract users
-	log.Println("Extracting users...")
-	users, err := e.asanaClient.GetAllUsers(ctx)
-	if err != nil {
-		return stats, fmt.Errorf("failed to extract users: %w", err)
-	}
+	var wg sync.WaitGroup
+	doneProcessing := make(chan struct{})
 
-	log.Printf("Found %d users", len(users))
-
-	// Write each user to storage
-	for _, user := range users {
-		if err := e.storage.WriteUser(user); err != nil {
-			log.Printf("Error writing user %s: %v", user.GID, err)
-			stats.Errors++
-			continue
+	// 1. THE ACTOR: Centralized Stats Collector
+	// This is the only goroutine allowed to modify the 'stats' pointer
+	go func() {
+		for update := range results {
+			update(stats)
 		}
-		stats.UsersExtracted++
-	}
+		close(doneProcessing)
+	}()
 
-	log.Printf("Successfully extracted %d users", stats.UsersExtracted)
-
-	// Extract projects
-	log.Println("Extracting projects...")
-	projects, err := e.asanaClient.GetAllProjects(ctx)
-	if err != nil {
-		return stats, fmt.Errorf("failed to extract projects: %w", err)
-	}
-
-	log.Printf("Found %d projects", len(projects))
-
-	// Write each project to storage
-	for _, project := range projects {
-		if err := e.storage.WriteProject(project); err != nil {
-			log.Printf("Error writing project %s: %v", project.GID, err)
-			stats.Errors++
-			continue
+	// 2. WORKER: User Extraction & Storage
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		users, err := e.asanaClient.GetAllUsers(ctx)
+		if err != nil {
+			errChan <- fmt.Errorf("user API failure: %w", err)
+			return
 		}
-		stats.ProjectsExtracted++
+
+		for _, user := range users {
+			// THE WRITE HAPPENS HERE
+			if err := e.storage.WriteUser(user); err != nil {
+				log.Printf("Error writing user %s: %v", user.GID, err)
+				results <- func(s *Stats) { s.Errors++ }
+				continue
+			}
+			results <- func(s *Stats) { s.UsersExtracted++ }
+		}
+	}()
+
+	// 3. WORKER: Project Extraction & Storage
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		projects, err := e.asanaClient.GetAllProjects(ctx)
+		if err != nil {
+			errChan <- fmt.Errorf("project API failure: %w", err)
+			return
+		}
+
+		for _, project := range projects {
+			// THE WRITE HAPPENS HERE
+			if err := e.storage.WriteProject(project); err != nil {
+				log.Printf("Error writing project %s: %v", project.GID, err)
+				results <- func(s *Stats) { s.Errors++ }
+				continue
+			}
+			results <- func(s *Stats) { s.ProjectsExtracted++ }
+		}
+	}()
+
+	// 4. COORDINATION
+	// Wait for workers in the background so we can check errChan immediately
+	go func() {
+		wg.Wait()
+		close(results)
+		close(errChan)
+	}()
+
+	// Check if any worker sent a fatal API error
+	for err := range errChan {
+		if err != nil {
+			stats.Duration = time.Since(startTime)
+			return stats, err
+		}
 	}
 
-	log.Printf("Successfully extracted %d projects", stats.ProjectsExtracted)
+	// Wait for the stats collector to finish processing the last updates
+	<-doneProcessing
 
 	stats.Duration = time.Since(startTime)
-	log.Printf("Extraction completed in %v", stats.Duration)
-
 	return stats, nil
 }

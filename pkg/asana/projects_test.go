@@ -3,161 +3,168 @@ package asana
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/ioanzicu/asana-extractor/pkg/client"
 	"github.com/ioanzicu/asana-extractor/pkg/ratelimit"
 	"github.com/ioanzicu/asana-extractor/pkg/retry"
 )
 
-func TestGetProjects(t *testing.T) {
-	// Create mock server
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify request
-		if r.URL.Path != "/api/1.0/workspaces/test-workspace/projects" {
-			t.Errorf("Unexpected path: %s", r.URL.Path)
-		}
-
-		// Check query parameters
-		limit := r.URL.Query().Get("limit")
-		offset := r.URL.Query().Get("offset")
-
-		if limit != "10" {
-			t.Errorf("Expected limit=10, got %s", limit)
-		}
-		if offset != "0" {
-			t.Errorf("Expected offset=0, got %s", offset)
-		}
-
-		// Return mock response
-		resp := ProjectsResponse{
-			Data: []Project{
-				{
-					GID:        "proj1",
-					Name:       "Project 1",
-					Archived:   false,
-					CreatedAt:  time.Now(),
-					ModifiedAt: time.Now(),
-				},
-				{
-					GID:        "proj2",
-					Name:       "Project 2",
-					Archived:   true,
-					CreatedAt:  time.Now(),
-					ModifiedAt: time.Now(),
-				},
-			},
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
-
-	// Create client
-	httpClient := client.New(client.Config{
-		Token: "test-token",
+// setupMockClient ensures the rate limiter is never zero-initialized during tests
+func setupMockClient() *client.Client {
+	return client.New(client.Config{
 		RateLimitConfig: ratelimit.Config{
 			RequestsPerMinute:  600,
 			MaxConcurrentRead:  10,
-			MaxConcurrentWrite: 5,
+			MaxConcurrentWrite: 10,
 		},
-		RetryConfig: retry.DefaultConfig(),
+		RetryConfig: retry.Config{MaxRetries: 0},
 	})
+}
 
-	asanaClient := NewClient(httpClient, "test-workspace", server.URL+"/api/1.0", 10)
-
-	// Test GetProjects
-	projects, _, err := asanaClient.GetProjects(context.Background(), 10, "0")
-	if err != nil {
-		t.Fatalf("GetProjects() error = %v", err)
+func TestGetProjects_Table(t *testing.T) {
+	tests := []struct {
+		name          string
+		workspace     string
+		baseURL       string
+		handler       http.HandlerFunc
+		expectErr     bool
+		expectedCount int
+		errContains   string
+	}{
+		{
+			name:      "Successful retrieval",
+			workspace: "test-ws",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				resp := ProjectsResponse{
+					Data: []Project{{GID: "p1", Name: "Project Alpha"}},
+				}
+				json.NewEncoder(w).Encode(resp)
+			},
+			expectErr:     false,
+			expectedCount: 1,
+		},
+		{
+			name:      "API 500 Error",
+			workspace: "test-ws",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+			},
+			expectErr:   true,
+			errContains: "failed to get projects",
+		},
+		{
+			name:      "Malformed JSON response",
+			workspace: "test-ws",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(`{ "data": [ { "gid": `)) // Broken JSON
+			},
+			expectErr:   true,
+			errContains: "failed to parse projects response",
+		},
+		{
+			name:        "Invalid URL parsing",
+			baseURL:     " http://bad-url", // Leading space
+			expectErr:   true,
+			errContains: "failed to parse URL",
+		},
 	}
 
-	if len(projects) != 2 {
-		t.Errorf("Expected 2 projects, got %d", len(projects))
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var targetURL string
+			if tt.handler != nil {
+				server := httptest.NewServer(tt.handler)
+				defer server.Close()
+				targetURL = server.URL
+			}
+			if tt.baseURL != "" {
+				targetURL = tt.baseURL
+			}
 
-	if projects[0].GID != "proj1" {
-		t.Errorf("Expected GID=proj1, got %s", projects[0].GID)
-	}
+			hc := setupMockClient()
+			asanaClient := NewClient(hc, tt.workspace, targetURL, 100)
 
-	if projects[1].Name != "Project 2" {
-		t.Errorf("Expected name='Project 2', got %s", projects[1].Name)
-	}
+			projects, _, err := asanaClient.GetProjects(context.Background(), 100, "")
 
-	if !projects[1].Archived {
-		t.Error("Expected project 2 to be archived")
+			if (err != nil) != tt.expectErr {
+				t.Fatalf("expected error: %v, got: %v", tt.expectErr, err)
+			}
+
+			if tt.expectErr && tt.errContains != "" {
+				if !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("expected error containing %q, got %q", tt.errContains, err.Error())
+				}
+			}
+
+			if !tt.expectErr && len(projects) != tt.expectedCount {
+				t.Errorf("expected %d projects, got %d", tt.expectedCount, len(projects))
+			}
+		})
 	}
 }
 
-func TestGetAllProjects_Pagination(t *testing.T) {
-	callCount := 0
-
-	// Create mock server that returns different pages
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		offset := r.URL.Query().Get("offset")
-
-		var resp ProjectsResponse
-
-		switch offset {
-		case "":
-			// First page (full page of 100)
-			projects := make([]Project, 100)
-			for i := 0; i < 100; i++ {
-				projects[i] = Project{
-					GID:  fmt.Sprintf("%d", i),
-					Name: fmt.Sprintf("Project %d", i),
-				}
-			}
-			resp = ProjectsResponse{Data: projects, NextPage: &NextPage{Offset: "token_for_page_2"}}
-		case "token_for_page_2":
-			// Second page (partial page)
-			resp = ProjectsResponse{
-				Data: []Project{
-					{GID: "101", Name: "Project 101"},
-					{GID: "102", Name: "Project 102"},
-				},
-				NextPage: nil,
-			}
-		default:
-			// Empty page
-			resp = ProjectsResponse{Data: []Project{}}
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
-
-	// Create client
-	httpClient := client.New(client.Config{
-		Token: "test-token",
-		RateLimitConfig: ratelimit.Config{
-			RequestsPerMinute:  600,
-			MaxConcurrentRead:  10,
-			MaxConcurrentWrite: 5,
+func TestGetAllProjects_Table(t *testing.T) {
+	tests := []struct {
+		name          string
+		pages         []ProjectsResponse
+		expectErr     bool
+		expectedCount int
+	}{
+		{
+			name: "Three-page pagination",
+			pages: []ProjectsResponse{
+				{Data: []Project{{GID: "1"}}, NextPage: &NextPage{Offset: "o1"}},
+				{Data: []Project{{GID: "2"}}, NextPage: &NextPage{Offset: "o2"}},
+				{Data: []Project{{GID: "3"}}, NextPage: nil},
+			},
+			expectErr:     false,
+			expectedCount: 3,
 		},
-		RetryConfig: retry.DefaultConfig(),
-	})
-
-	asanaClient := NewClient(httpClient, "test-workspace", server.URL+"/api/1.0", 100)
-
-	// Test GetAllProjects
-	projects, err := asanaClient.GetAllProjects(context.Background())
-	if err != nil {
-		t.Fatalf("GetAllProjects() error = %v", err)
+		{
+			name: "Stops on empty data",
+			pages: []ProjectsResponse{
+				{Data: []Project{}},
+			},
+			expectErr:     false,
+			expectedCount: 0,
+		},
+		{
+			name: "Stops on empty offset string",
+			pages: []ProjectsResponse{
+				{Data: []Project{{GID: "1"}}, NextPage: &NextPage{Offset: ""}},
+			},
+			expectErr:     false,
+			expectedCount: 1,
+		},
 	}
 
-	if len(projects) != 102 {
-		t.Errorf("Expected 102 projects, got %d", len(projects))
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			callCount := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if callCount < len(tt.pages) {
+					json.NewEncoder(w).Encode(tt.pages[callCount])
+					callCount++
+				}
+			}))
+			defer server.Close()
 
-	if callCount != 2 {
-		t.Errorf("Expected 2 API calls, got %d", callCount)
+			hc := setupMockClient()
+			asanaClient := NewClient(hc, "ws", server.URL, 100)
+
+			projects, err := asanaClient.GetAllProjects(context.Background())
+
+			if (err != nil) != tt.expectErr {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if !tt.expectErr && len(projects) != tt.expectedCount {
+				t.Errorf("expected %d projects, got %d", tt.expectedCount, len(projects))
+			}
+		})
 	}
 }

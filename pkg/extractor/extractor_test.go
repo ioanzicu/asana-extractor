@@ -3,101 +3,116 @@ package extractor
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/ioanzicu/asana-extractor/pkg/asana"
 )
 
 type mockAsanaClient struct {
-	usersFunc    func(ctx context.Context) ([]asana.User, error)
-	projectsFunc func(ctx context.Context) ([]asana.Project, error)
+	users    []asana.User
+	projects []asana.Project
+	err      error
 }
 
 func (m *mockAsanaClient) GetAllUsers(ctx context.Context) ([]asana.User, error) {
-	return m.usersFunc(ctx)
+	return m.users, m.err
 }
-
 func (m *mockAsanaClient) GetAllProjects(ctx context.Context) ([]asana.Project, error) {
-	return m.projectsFunc(ctx)
+	return m.projects, m.err
 }
 
 type mockStorage struct {
-	writeUserFunc    func(user asana.User) error
-	writeProjectFunc func(project asana.Project) error
+	mu        sync.Mutex
+	users     []asana.User
+	projects  []asana.Project
+	failWrite bool
 }
 
-func (m *mockStorage) WriteUser(u asana.User) error       { return m.writeUserFunc(u) }
-func (m *mockStorage) WriteProject(p asana.Project) error { return m.writeProjectFunc(p) }
+func (m *mockStorage) WriteUser(u asana.User) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failWrite {
+		return fmt.Errorf("disk error")
+	}
+	m.users = append(m.users, u)
+	return nil
+}
 
-func TestExtractor_Extract_WithInterface(t *testing.T) {
+func (m *mockStorage) WriteProject(p asana.Project) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failWrite {
+		return fmt.Errorf("disk error")
+	}
+	m.projects = append(m.projects, p)
+	return nil
+}
+func TestExtractor_Extract(t *testing.T) {
 	tests := []struct {
 		name             string
 		mockUsers        []asana.User
-		userErr          error
 		mockProjects     []asana.Project
-		projErr          error
-		storageUserErr   error // Independent user error
-		storageProjErr   error // Independent project error
+		apiError         error
+		storageFail      bool
+		expectErr        bool
 		expectedUsers    int
 		expectedProjects int
 		expectedErrors   int
-		expectErr        bool
 	}{
 		{
-			name:             "Success path",
-			mockUsers:        []asana.User{{GID: "u1"}},
+			name:             "Successful full extraction",
+			mockUsers:        []asana.User{{GID: "u1"}, {GID: "u2"}},
 			mockProjects:     []asana.Project{{GID: "p1"}},
-			expectedUsers:    1,
+			expectErr:        false,
+			expectedUsers:    2,
 			expectedProjects: 1,
-			expectedErrors:   0,
 		},
 		{
-			name:      "API failure on Users",
-			userErr:   fmt.Errorf("asana down"),
+			name:      "API failure returns error immediately",
+			apiError:  fmt.Errorf("unauthorized"),
 			expectErr: true,
 		},
 		{
-			name:             "Storage failure on Projects only",
+			name:             "Storage failures tracked but don't stop extraction",
 			mockUsers:        []asana.User{{GID: "u1"}},
-			mockProjects:     []asana.Project{{GID: "p1"}, {GID: "p2"}},
-			storageUserErr:   nil,              // Users should succeed
-			storageProjErr:   fmt.Errorf("db"), // Projects should fail
-			expectedUsers:    1,
+			mockProjects:     []asana.Project{{GID: "p1"}},
+			storageFail:      true,
+			expectErr:        false,
+			expectedUsers:    0,
 			expectedProjects: 0,
 			expectedErrors:   2,
-			expectErr:        false,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			mAsana := &mockAsanaClient{
-				usersFunc:    func(ctx context.Context) ([]asana.User, error) { return tc.mockUsers, tc.userErr },
-				projectsFunc: func(ctx context.Context) ([]asana.Project, error) { return tc.mockProjects, tc.projErr },
+			mockClient := &mockAsanaClient{
+				users:    tc.mockUsers,
+				projects: tc.mockProjects,
+				err:      tc.apiError,
 			}
+			mockStore := &mockStorage{failWrite: tc.storageFail}
 
-			// Map the specific errors to the mock functions
-			mStorage := &mockStorage{
-				writeUserFunc:    func(u asana.User) error { return tc.storageUserErr },
-				writeProjectFunc: func(p asana.Project) error { return tc.storageProjErr },
-			}
-
-			extractor := New(mAsana, mStorage)
-			stats, err := extractor.Extract(context.Background())
+			e := New(mockClient, mockStore)
+			stats, err := e.Extract(context.Background())
 
 			if (err != nil) != tc.expectErr {
-				t.Fatalf("expectErr %v, got %v", tc.expectErr, err)
+				t.Fatalf("expected error: %v, got: %v", tc.expectErr, err)
 			}
 
-			if !tc.expectErr {
+			if err == nil {
 				if stats.UsersExtracted != tc.expectedUsers {
-					t.Errorf("expected users %d, got %d", tc.expectedUsers, stats.UsersExtracted)
+					t.Errorf("expected %d users, got %d", tc.expectedUsers, stats.UsersExtracted)
 				}
 				if stats.ProjectsExtracted != tc.expectedProjects {
-					t.Errorf("expected projects %d, got %d", tc.expectedProjects, stats.ProjectsExtracted)
+					t.Errorf("expected %d projects, got %d", tc.expectedProjects, stats.ProjectsExtracted)
 				}
 				if stats.Errors != tc.expectedErrors {
-					t.Errorf("expected errors %d, got %d", tc.expectedErrors, stats.Errors)
+					t.Errorf("expected %d errors, got %d", tc.expectedErrors, stats.Errors)
+				}
+				if stats.Duration <= 0 {
+					t.Error("duration should be positive")
 				}
 			}
 		})
