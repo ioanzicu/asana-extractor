@@ -1,202 +1,115 @@
 # Asana Extractor
 
-A production-ready Go application that extracts users and projects from the Asana API with robust rate limiting, retry logic, and configurable scheduling.
+A production-ready Go application that extracts users and projects from the Asana API. Built with a focus on resiliency, it features a custom token-bucket rate limiter, exponential backoff, and a high-precision cron-based scheduler.
 
-## Features
+## 🚀 Step-by-Step Quick Start
 
-- ✅ **Modular rate limiting** - Token bucket algorithm enforcing 150 requests/minute (free tier)
-- ✅ **Smart retry logic** - Exponential backoff with jitter and `Retry-After` header support
-- ✅ **Pagination support** - Handles high-volume workspaces with automatic pagination
-- ✅ **Configurable scheduling** - Cron-based scheduling for periodic extraction
-- ✅ **Individual JSON output** - Each user/project saved as separate JSON file
-- ✅ **Graceful error handling** - Comprehensive logging and error recovery
-- ✅ **Thread-safe** - Concurrent request management
-- ✅ **Extensible design** - Interface-based architecture for easy customization
+1.  **Clone & Navigate**:
+    ```bash
+    git clone <your-repo-url>
+    cd asana-extractor
+    ```
 
-## Installation
+2.  **Environment Setup**:
+    ```bash
+    cp .env.example .env
+    ```
+    Open `.env` and provide your `ASANA_TOKEN` and `ASANA_WORKSPACE`.
 
-### Prerequisites
+3.  **Install & Test**:
+    ```bash
+    make deps
+    make test
+    ```
 
-- Go 1.21 or higher
-- Asana API token (Personal Access Token)
-- Asana workspace ID or name
+4.  **Build & Run**:
+    ```bash
+    make build
+    ./bin/asana-extractor
+    ```
 
-### Setup
+---
 
-1. Clone or navigate to the repository:
-```bash
-cd /asana-extractor
-```
+## 🛠 Main Functionality
 
-2. Install dependencies:
-```bash
-go mod download
-```
+The application operates as a scheduled service that performs the following:
 
-3. Configure environment variables:
-```bash
-cp .env.example .env
-# Edit .env with your Asana credentials
-```
+1.  **Identity Discovery**: Connects to Asana and fetches all accessible users and projects within the configured workspace.
+2.  **Resilient Extraction**: Processes resources using an internal queue that respects Asana's strict rate limits (Requests Per Minute and Concurrent Request limits).
+3.  **Atomic Persistence**: Saves each resource as an individual JSON file, using the Asana GID as the unique identifier to ensure data consistency and prevent overwrites.
 
-## Configuration
 
-The application is configured via environment variables. See [.env.example](.env.example) for all available options.
+
+---
+
+## 🌟 Key Features
+
+* **6-Field Cron Scheduling**: High-precision scheduling allowing for second-level granularity (e.g., `0 */5 * * * *`).
+* **Cursor-Based Pagination**: Automatically handles large datasets by following Asana's `next_page` tokens, ensuring no data is missed in high-volume environments.
+* **Smart Retries**: Implements exponential backoff with jitter and full support for the `Retry-After` header sent by the Asana API.
+* **Concurrency Control**: Separates Read (GET) and Write (POST/PUT) limits to maximize throughput without triggering account "Concurrent Request" bans.
+* **Graceful Shutdown**: Listens for OS signals (SIGINT, SIGTERM) to stop the scheduler cleanly, ensuring current file writes complete before exiting.
+
+---
+
+## ⚠️ Limits & Constraints
+
+| Category | Limit | Description |
+| :--- | :--- | :--- |
+| **Throughput** | 150 RPM | Optimized for Asana Free Tier; adjustable via `REQUESTS_PER_MINUTE`. |
+| **Concurrency** | 50 Read / 15 Write | Enforced via internal semaphores to prevent API-side connection rejection. |
+| **Pagination** | 100 items/page | Set to Asana's maximum page size to minimize network round-trips. |
+| **Scheduling** | 1 Second | Minimum supported interval between extractions due to 6-field cron parser. |
+| **Storage** | File System | Extraction speed is ultimately bounded by disk IOPS when writing thousands of small JSON files. |
+
+---
+
+## ⚙️ Full Configuration Guide
+
+The following variables are available in your `.env` file:
 
 ### Required Variables
+| Variable | Example | Description |
+| :--- | :--- | :--- |
+| `ASANA_TOKEN` | `1/123...` | Your Personal Access Token (PAT). |
+| `ASANA_WORKSPACE` | `123456789` | The GID of the target workspace. |
 
-```bash
-ASANA_TOKEN=your-personal-access-token
-ASANA_WORKSPACE=your-workspace-id-or-name
-```
+### Scheduling (6-Field Cron)
+*Format: [Sec] [Min] [Hour] [Dom] [Mon] [Dow]*
 
-### Optional Variables
+| Frequency | Expression |
+| :--- | :--- |
+| **Every 5 Minutes** | `0 */5 * * * *` |
+| **Every 30 Minutes** | `0 */30 * * * *` |
+| **Every Hour** | `0 0 * * * *` |
+| **Every Day (Midnight)** | `0 0 0 * * *` |
 
+### Fine-Tuning
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `SCHEDULE_CRON` | `*/5 * * * *` | Cron expression for scheduling |
-| `OUTPUT_DIR` | `./output` | Directory for JSON output files |
-| `REQUESTS_PER_MINUTE` | `150` | Rate limit (free tier) |
-| `MAX_CONCURRENT_READ` | `50` | Max concurrent GET requests |
-| `MAX_CONCURRENT_WRITE` | `15` | Max concurrent POST/PUT/PATCH/DELETE |
-| `HTTP_TIMEOUT` | `30s` | HTTP client timeout |
-| `MAX_RETRIES` | `5` | Maximum retry attempts |
-| `INITIAL_BACKOFF` | `1s` | Initial retry backoff |
-| `MAX_BACKOFF` | `60s` | Maximum retry backoff |
+| :--- | :--- | :--- |
+| `REQUESTS_PER_MINUTE` | `150` | Global token bucket refill rate. |
+| `MAX_CONCURRENT_READ` | `50` | Simultaneous GET requests allowed. |
+| `MAX_CONCURRENT_WRITE` | `15` | Simultaneous POST/PUT/DELETE requests allowed. |
+| `MAX_RETRIES` | `5` | Attempts per request before failing. |
+| `INITIAL_BACKOFF` | `1s` | Starting wait time for exponential backoff. |
+| `MAX_BACKOFF` | `60s` | Maximum duration to wait between retries. |
+| `HTTP_TIMEOUT` | `30s` | Maximum duration for a single network request. |
+| `USER_PAGE_SIZE` | `100` | Results per page for User queries. |
+| `PROJECT_PAGE_SIZE` | `100` | Results per page for Project queries. |
+| `OUTPUT_DIR` | `./output` | Destination path for JSON data storage. |
+| `BASE_URL` | `https://app...` | Asana API base endpoint. |
 
-### Scheduling Examples
+---
 
-```bash
-# Every 5 minutes (default)
-SCHEDULE_CRON="*/5 * * * *"
+## 📂 Output Structure
 
-# Every 30 minutes
-SCHEDULE_CRON="*/30 * * * *"
+Resources are stored in subdirectories based on type. Files are named using the Asana GID.
 
-# Every hour
-SCHEDULE_CRON="0 * * * *"
-
-# Every day at 2 AM
-SCHEDULE_CRON="0 2 * * *"
-```
-
-**Note**: For intervals less than 1 minute (e.g., every 30 seconds), you'll need to implement a custom scheduler. The current cron-based implementation supports minute-level granularity.
-
-## Usage
-
-### Build
-
-```bash
-make build
-# or
-go build -o bin/asana-extractor ./cmd/extractor
-```
-
-### Run
-
-```bash
-# Using make
-make run
-
-# Or directly
-go run ./cmd/extractor/main.go
-
-# Or using the binary
-./bin/asana-extractor
-```
-
-### Output
-
-The extractor creates the following directory structure:
-
-```
+```text
 output/
 ├── users/
-│   ├── 1234567890.json
-│   ├── 9876543210.json
-│   └── ...
+│   ├── 11002233.json
+│   └── 11002234.json
 └── projects/
-    ├── 1111111111.json
-    ├── 2222222222.json
-    └── ...
-```
-
-Each file contains the complete JSON representation of a user or project.
-
-## Rate Limiting
-
-The application implements Asana's rate limiting requirements:
-
-- **Standard rate limit**: 150 requests/minute for free tier
-- **Concurrent requests**: 50 GET, 15 POST/PUT/PATCH/DELETE
-- **Retry-After header**: Automatically respected on 429 responses
-- **Exponential backoff**: With jitter to avoid thundering herd
-
-### Handling 429 Errors
-
-When the API returns a `429 Too Many Requests` response, the application:
-
-1. Reads the `Retry-After` header
-2. Waits for the specified duration
-3. Retries the request (up to `MAX_RETRIES` times)
-4. Uses exponential backoff if `Retry-After` is not specified
-
-## Testing
-
-```bash
-# Run all tests
-make test
-# or
-go test ./...
-
-# Run with race detection
-go test -race ./...
-
-# Run with coverage
-go test -cover ./...
-```
-
-## Architecture
-
-```
-cmd/extractor/          - Main application entry point
-pkg/
-  ├── ratelimit/        - Rate limiting with token bucket
-  ├── retry/            - Retry logic with exponential backoff
-  ├── client/           - HTTP client with rate limiting & retry
-  ├── asana/            - Asana API client
-  ├── config/           - Configuration management
-  ├── scheduler/        - Cron-based scheduler
-  ├── storage/          - JSON file storage
-  └── extractor/        - Extraction orchestration
-```
-
-## Troubleshooting
-
-### Rate Limit Errors
-
-If you're hitting rate limits frequently:
-
-1. Reduce `REQUESTS_PER_MINUTE` to be more conservative
-2. Increase `INITIAL_BACKOFF` and `MAX_BACKOFF`
-3. Check if you have a paid Asana plan with higher limits
-
-### Large Workspaces
-
-For workspaces with >1000 users/projects:
-
-- The pagination is automatic and handles large datasets
-- Extraction may take longer due to rate limiting
-- Consider adjusting the schedule to run less frequently
-
-### Network Issues
-
-The application automatically retries on network errors with exponential backoff. If issues persist:
-
-1. Check your internet connection
-2. Verify the Asana API is accessible
-3. Increase `HTTP_TIMEOUT` if requests are timing out
-
-## License
-
-MIT
+    ├── 44556677.json
+    └── 44556678.json
